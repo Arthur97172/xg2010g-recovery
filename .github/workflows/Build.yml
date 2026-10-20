@@ -15,7 +15,7 @@ on:
           - "4"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: xg2010g-initramfs-recovery
