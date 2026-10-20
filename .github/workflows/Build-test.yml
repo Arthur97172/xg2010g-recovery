@@ -237,7 +237,18 @@ jobs:
             '/^define Device\/gemtek_xg2010g$/,/^endef$/p' \
             target/linux/airoha/image/an7581.mk
 
-      - name: Remove PON packages from Recovery build
+      # ============================================================
+      # Remove PON packages and include Ethernet PHY drivers
+      #
+      # Keep Recovery minimal, but include the drivers needed by:
+      #   - RTL8261N 10G Ethernet PHY
+      #   - Airoha EN8811H 2.5G Ethernet PHY
+      #   - Built-in Airoha Ethernet MAC / MT7530 switch
+      #
+      # NOTE:
+      # The Ethernet PHY drivers must be available in the source tree.
+      # ============================================================
+      - name: Configure Recovery Ethernet drivers
         working-directory: immortalwrt
         shell: bash
         run: |
@@ -247,6 +258,12 @@ jobs:
           from pathlib import Path
 
           path = Path("target/linux/airoha/image/an7581.mk")
+
+          if not path.is_file():
+              raise SystemExit(
+                  f"ERROR: Device image definition not found: {path}"
+              )
+
           lines = path.read_text().splitlines()
 
           start_marker = "define Device/gemtek_xg2010g"
@@ -258,7 +275,8 @@ jobs:
 
           if len(starts) != 1:
               raise SystemExit(
-                  "ERROR: Expected exactly one XG2010G device definition."
+                  "ERROR: Expected exactly one "
+                  "Device/gemtek_xg2010g definition."
               )
 
           start = starts[0]
@@ -283,39 +301,96 @@ jobs:
 
           if len(package_indexes) != 1:
               raise SystemExit(
-                  "ERROR: Expected exactly one DEVICE_PACKAGES declaration."
+                  "ERROR: Expected exactly one DEVICE_PACKAGES "
+                  "declaration in the XG2010G device definition."
               )
 
           i = package_indexes[0]
 
-          # Replace only the XG2010G package list.
-          # Do not modify the kernel, DTB, or Recovery image rule.
-          block[i:i + 3] = [
-              "  DEVICE_PACKAGES := fitblk kmod-leds-gpio "
-              "kmod-gpio-button-hotplug"
+          # Remove the complete multiline DEVICE_PACKAGES declaration.
+          j = i
+
+          while block[j].rstrip().endswith("\\"):
+              j += 1
+
+              if j >= len(block):
+                  raise SystemExit(
+                      "ERROR: Incomplete DEVICE_PACKAGES declaration."
+                  )
+
+          old_packages = " ".join(
+              line.strip().rstrip("\\").strip()
+              for line in block[i:j + 1]
+          )
+
+          print("Previous device package declaration:")
+          print(old_packages)
+
+          # Keep Recovery minimal while including Ethernet PHY support.
+          new_packages = [
+              "fitblk",
+              "kmod-leds-gpio",
+              "kmod-gpio-button-hotplug",
+              "kmod-phy-realtek",
+              "rtl826x-firmware",
+              "kmod-phy-airoha-en8811h",
           ]
 
-          if any(
-              package in "\n".join(block)
-              for package in (
-                  "kmod-airoha-xpon-en757x",
-                  "kmod-airoha-pon-lddla",
-                  "airoha-pon-firmware",
-                  "airoha-pon-manager",
-              )
-          ):
+          block[i:j + 1] = [
+              "  DEVICE_PACKAGES := " + " ".join(new_packages)
+          ]
+
+          new_block = "\n".join(block)
+
+          # Verify that the unwanted PON packages are no longer selected.
+          forbidden_pon_packages = [
+              "kmod-airoha-xpon-en757x",
+              "kmod-airoha-pon-lddla",
+              "airoha-pon-firmware",
+              "airoha-pon-manager",
+          ]
+
+          remaining = [
+              package
+              for package in forbidden_pon_packages
+              if package in new_block
+          ]
+
+          if remaining:
               raise SystemExit(
-                  "ERROR: A PON package remains in the XG2010G device block."
+                  "ERROR: PON packages remain in the XG2010G "
+                  f"device definition: {remaining}"
               )
+
+          # Verify that the requested Ethernet packages are present.
+          for package in (
+              "kmod-phy-realtek",
+              "rtl826x-firmware",
+              "kmod-phy-airoha-en8811h",
+          ):
+              if package not in new_packages:
+                  raise SystemExit(
+                      f"ERROR: Ethernet package missing: {package}"
+                  )
 
           lines[start:end + 1] = block
           path.write_text("\n".join(lines) + "\n")
 
-          print("PASS: PON packages removed from the Recovery profile.")
-          print("PASS: XG2010G Recovery kernel rule remains unchanged.")
-          print("Remaining device packages:")
-          print(block[i])
+          print()
+          print("PASS: PON packages removed from Recovery profile.")
+          print("PASS: Ethernet PHY packages added to Recovery profile.")
+          print("Selected XG2010G device packages:")
+
+          for package in new_packages:
+              print(f"  {package}")
           PY
+
+          echo "===== Verify XG2010G Ethernet package configuration ====="
+
+          sed -n \
+            '/^define Device\/gemtek_xg2010g$/,/^endef$/p' \
+            target/linux/airoha/image/an7581.mk
+      
 
       # ============================================================
       # 5. Create a minimal Recovery configuration
