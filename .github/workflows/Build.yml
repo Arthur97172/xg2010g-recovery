@@ -33,7 +33,7 @@ jobs:
 
     steps:
       # ============================================================
-      # 1. Checkout the dedicated XG2010G source repository
+      # 1. Checkout XG2010G source
       # ============================================================
       - name: Checkout XG2010G source
         uses: actions/checkout@v4
@@ -103,7 +103,7 @@ jobs:
             make
 
       # ============================================================
-      # 3. Install feeds
+      # 3. Update and install feeds
       # ============================================================
       - name: Update and install feeds
         working-directory: immortalwrt
@@ -112,16 +112,16 @@ jobs:
           set -Eeuo pipefail
 
           echo "===== Update feeds ====="
-          ./scripts/feeds update -a
+          ./scripts/feeds update -a 2>&1 | tee feeds-update.log
 
           echo "===== Install feeds ====="
-          ./scripts/feeds install -a
+          ./scripts/feeds install -a 2>&1 | tee feeds-install.log
 
       # ============================================================
-      # 4. Disable Sysupgrade image generation
+      # 4. Restrict XG2010G image generation to Recovery
       #
-      # Keep the XG2010G device definition and its Recovery rules.
-      # Remove only the Sysupgrade image declaration for this device.
+      # Keep KERNEL_INITRAMFS and its -recovery.itb suffix.
+      # Remove only the Sysupgrade image declaration.
       # ============================================================
       - name: Restrict image generation to Recovery
         working-directory: immortalwrt
@@ -133,94 +133,194 @@ jobs:
           from pathlib import Path
 
           path = Path("target/linux/airoha/image/an7581.mk")
-          source = path.read_text()
 
-          start_marker = "define Device/gemtek_xg2010g\n"
-
-          if start_marker not in source:
+          if not path.is_file():
               raise SystemExit(
-                  "ERROR: Device/gemtek_xg2010g was not found. "
-                  "The upstream device definition may have changed."
+                  f"ERROR: Device image definition not found: {path}"
               )
 
-          start = source.index(start_marker)
-          end = source.index("\nendef", start)
+          lines = path.read_text().splitlines()
 
-          block = source[start:end]
+          start_marker = "define Device/gemtek_xg2010g"
 
-          # Exact Sysupgrade image declaration in the current source.
-          old = r"""  IMAGES := sysupgrade.itb
-            IMAGE/sysupgrade.itb := append-kernel | \
-            fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb external-static-with-rootfs | \
-            append-metadata
-          """
+          starts = [
+              i for i, line in enumerate(lines)
+              if line.strip() == start_marker
+          ]
 
-          # Normalize indentation only for matching the declaration.
-          lines = block.splitlines()
-          result = []
-          i = 0
-          removed = False
-
-          while i < len(lines):
-              if lines[i].strip() == "IMAGES := sysupgrade.itb":
-                  if i + 3 >= len(lines):
-                      raise SystemExit(
-                          "ERROR: Incomplete Sysupgrade declaration."
-                      )
-
-                  if not lines[i + 1].strip().startswith(
-                      "IMAGE/sysupgrade.itb :="
-                  ):
-                      raise SystemExit(
-                          "ERROR: Unexpected Sysupgrade image declaration."
-                      )
-
-                  if not lines[i + 2].strip().startswith("fit gzip "):
-                      raise SystemExit(
-                          "ERROR: Unexpected Sysupgrade FIT rule."
-                      )
-
-                  if lines[i + 3].strip() != "append-metadata":
-                      raise SystemExit(
-                          "ERROR: Unexpected Sysupgrade metadata rule."
-                      )
-
-                  result.extend([])
-                  i += 4
-                  removed = True
-                  continue
-
-              result.append(lines[i])
-              i += 1
-
-          if not removed:
+          if len(starts) != 1:
               raise SystemExit(
-                  "ERROR: Sysupgrade declaration was not found; "
-                  "refusing to modify an unexpected device definition."
+                  "ERROR: Expected exactly one "
+                  "Device/gemtek_xg2010g definition."
               )
 
-          new_block = "\n".join(result)
+          start = starts[0]
+
+          end_candidates = [
+              i for i in range(start + 1, len(lines))
+              if lines[i].strip() == "endef"
+          ]
+
+          if not end_candidates:
+              raise SystemExit(
+                  "ERROR: Device definition has no matching endef."
+              )
+
+          end = end_candidates[0]
+          block = lines[start:end + 1]
+
+          # Find the exact Sysupgrade declaration.
+          image_indexes = [
+              i for i, line in enumerate(block)
+              if line.strip() == "IMAGES := sysupgrade.itb"
+          ]
+
+          if len(image_indexes) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one "
+                  "'IMAGES := sysupgrade.itb' declaration."
+              )
+
+          i = image_indexes[0]
+
+          expected = [
+              "IMAGES := sysupgrade.itb",
+              "IMAGE/sysupgrade.itb := append-kernel | \\",
+              "fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb external-static-with-rootfs | \\",
+              "append-metadata",
+          ]
+
+          actual = [
+              line.strip()
+              for line in block[i:i + len(expected)]
+          ]
+
+          if actual != expected:
+              print("Unexpected image declaration:")
+              for line in block[max(0, i - 1):i + 6]:
+                  print(repr(line))
+
+              raise SystemExit(
+                  "ERROR: Sysupgrade rule differs from the "
+                  "expected source. Refusing to modify it."
+              )
+
+          del block[i:i + len(expected)]
+
+          new_block = "\n".join(block)
 
           if "IMAGE/sysupgrade.itb" in new_block:
               raise SystemExit(
                   "ERROR: Sysupgrade image rule still exists."
               )
 
-          updated = source[:start] + new_block + source[end:]
-          path.write_text(updated)
+          if "KERNEL_INITRAMFS_SUFFIX := -recovery.itb" not in new_block:
+              raise SystemExit(
+                  "ERROR: Recovery image suffix is missing."
+              )
 
-          print("Sysupgrade image rule removed for gemtek_xg2010g.")
-          print("Recovery image rule preserved.")
+          if "KERNEL_INITRAMFS :=" not in new_block:
+              raise SystemExit(
+                  "ERROR: Recovery kernel rule is missing."
+              )
+
+          lines[start:end + 1] = block
+          path.write_text("\n".join(lines) + "\n")
+
+          print("PASS: XG2010G Sysupgrade rule removed.")
+          print("PASS: XG2010G Recovery rule preserved.")
           PY
 
-          echo "===== Verify image rules ====="
-          sed -n '/define Device\/gemtek_xg2010g/,/^endef/p' \
+          echo "===== Verify XG2010G device definition ====="
+
+          sed -n \
+            '/^define Device\/gemtek_xg2010g$/,/^endef$/p' \
             target/linux/airoha/image/an7581.mk
 
+      - name: Remove PON packages from Recovery build
+        working-directory: immortalwrt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("target/linux/airoha/image/an7581.mk")
+          lines = path.read_text().splitlines()
+
+          start_marker = "define Device/gemtek_xg2010g"
+
+          starts = [
+              i for i, line in enumerate(lines)
+              if line.strip() == start_marker
+          ]
+
+          if len(starts) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one XG2010G device definition."
+              )
+
+          start = starts[0]
+
+          ends = [
+              i for i in range(start + 1, len(lines))
+              if lines[i].strip() == "endef"
+          ]
+
+          if not ends:
+              raise SystemExit(
+                  "ERROR: XG2010G device definition has no endef."
+              )
+
+          end = ends[0]
+          block = lines[start:end + 1]
+
+          package_indexes = [
+              i for i, line in enumerate(block)
+              if line.strip().startswith("DEVICE_PACKAGES :=")
+          ]
+
+          if len(package_indexes) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one DEVICE_PACKAGES declaration."
+              )
+
+          i = package_indexes[0]
+
+          # Replace only the XG2010G package list.
+          # Do not modify the kernel, DTB, or Recovery image rule.
+          block[i:i + 3] = [
+              "  DEVICE_PACKAGES := fitblk kmod-leds-gpio "
+              "kmod-gpio-button-hotplug"
+          ]
+
+          if any(
+              package in "\n".join(block)
+              for package in (
+                  "kmod-airoha-xpon-en757x",
+                  "kmod-airoha-pon-lddla",
+                  "airoha-pon-firmware",
+                  "airoha-pon-manager",
+              )
+          ):
+              raise SystemExit(
+                  "ERROR: A PON package remains in the XG2010G device block."
+              )
+
+          lines[start:end + 1] = block
+          path.write_text("\n".join(lines) + "\n")
+
+          print("PASS: PON packages removed from the Recovery profile.")
+          print("PASS: XG2010G Recovery kernel rule remains unchanged.")
+          print("Remaining device packages:")
+          print(block[i])
+          PY
+
       # ============================================================
-      # 5. Generate a minimal XG2010G Recovery configuration
+      # 5. Create a minimal Recovery configuration
       #
-      # Do not copy config.seed: it enables many optional applications.
+      # Do not copy config.seed.
       # ============================================================
       - name: Configure minimal XG2010G Recovery
         working-directory: immortalwrt
@@ -238,9 +338,10 @@ jobs:
           EOF
 
           echo "===== Run make defconfig ====="
+
           make defconfig 2>&1 | tee config.log
 
-          echo "===== Verify required configuration ====="
+          echo "===== Verify required target options ====="
 
           for symbol in \
             CONFIG_TARGET_airoha \
@@ -249,35 +350,144 @@ jobs:
             CONFIG_TARGET_ROOTFS_INITRAMFS
           do
             if ! grep -qx "${symbol}=y" .config; then
-              echo "::error::Required option is missing: ${symbol}=y"
+              echo "::error::Required option missing: ${symbol}=y"
               exit 1
             fi
           done
 
-          echo "===== Check optional plugins ====="
+          echo "PASS: Required XG2010G Recovery target is selected."
 
-          if grep -E \
-            '^CONFIG_PACKAGE_(luci(-[[:alnum:].+-]+)?|sing-box|xray-core|rclone|openclash|adguardhome|tailscale|miniupnpd)=y$' \
-            .config; then
-            echo "::error::An unwanted optional package is enabled."
-            exit 1
-          fi
-
-          grep -E '^CONFIG_PACKAGE_[^=]+=y$' .config \
-            | sort > selected-packages.txt
-
-          echo "===== Selected package count ====="
-          wc -l selected-packages.txt
-
-          echo "===== Selected package list ====="
-          cat selected-packages.txt
-
+          # Save the resolved configuration before package auditing.
           cp .config xg2010g-recovery.config
 
-          echo "Minimal Recovery configuration verified."
+      # ============================================================
+      # 6. Audit unwanted standalone packages
+      #
+      # Do not mistake symbols such as:
+      # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y
+      # for standalone packages.
+      # ============================================================
+      - name: Audit selected packages
+        working-directory: immortalwrt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          config_path = Path(".config")
+          lines = config_path.read_text().splitlines()
+
+          # Collect every enabled CONFIG_PACKAGE symbol.
+          enabled_symbols = set()
+
+          for line in lines:
+              match = re.fullmatch(
+                  r"CONFIG_PACKAGE_(.+)=y",
+                  line
+              )
+
+              if match:
+                  enabled_symbols.add(match.group(1))
+
+          # Exact standalone package names.
+          # INCLUDE_* and other sub-options do not match these names.
+          forbidden_exact = {
+              "luci",
+              "luci-app-passwall",
+              "luci-app-passwall2",
+              "luci-app-ssr-plus",
+              "luci-app-rclone",
+              "sing-box",
+              "xray-core",
+              "rclone",
+              "openclash",
+              "luci-app-openclash",
+              "adguardhome",
+              "tailscale",
+              "miniupnpd",
+          }
+
+          forbidden = sorted(
+              enabled_symbols & forbidden_exact
+          )
+
+          # Check all standalone LuCI package symbols.
+          # The pattern deliberately excludes underscore sub-options,
+          # for example luci-lib-nixio_openssl.
+          luci_pattern = re.compile(
+              r"^luci(?:-[A-Za-z0-9.+-]+)?$"
+          )
+
+          enabled_luci = sorted(
+              symbol for symbol in enabled_symbols
+              if luci_pattern.fullmatch(symbol)
+          )
+
+          print("===== Forbidden standalone packages =====")
+
+          if forbidden:
+              for package in forbidden:
+                  print(f"  CONFIG_PACKAGE_{package}=y")
+
+          if enabled_luci:
+              print("===== Enabled standalone LuCI packages =====")
+              for package in enabled_luci:
+                  print(f"  CONFIG_PACKAGE_{package}=y")
+
+          if forbidden or enabled_luci:
+              raise SystemExit(
+                  "ERROR: Unwanted standalone package selections found."
+              )
+
+          print("PASS: No forbidden standalone packages selected.")
+
+          # These are configuration symbols, not necessarily packages.
+          # Print them separately for diagnostic purposes.
+          suboption_patterns = [
+              re.compile(r"^luci-app-passwall_INCLUDE_.+$"),
+              re.compile(r"^luci-app-passwall2_INCLUDE_.+$"),
+              re.compile(r"^luci-app-ssr-plus_INCLUDE_.+$"),
+              re.compile(r"^luci-app-rclone_INCLUDE_.+$"),
+              re.compile(r"^luci-lib-nixio_.+$"),
+          ]
+
+          suboptions = sorted(
+              symbol for symbol in enabled_symbols
+              if any(
+                  pattern.fullmatch(symbol)
+                  for pattern in suboption_patterns
+              )
+          )
+
+          print("===== Plugin-related sub-options =====")
+
+          if suboptions:
+              for symbol in suboptions:
+                  print(f"  CONFIG_PACKAGE_{symbol}=y")
+
+              print(
+                  "These are sub-options, not proof that the "
+                  "corresponding standalone packages are selected."
+              )
+          else:
+              print("No listed plugin-related sub-options enabled.")
+
+          # Save the raw symbol list for later diagnosis.
+          Path("selected-package-symbols.txt").write_text(
+              "".join(
+                  f"CONFIG_PACKAGE_{symbol}=y\n"
+                  for symbol in sorted(enabled_symbols)
+              )
+          )
+
+          print("Package audit completed.")
+          PY
 
       # ============================================================
-      # 6. Download sources for selected packages
+      # 7. Download sources for configured packages
       # ============================================================
       - name: Download build sources
         working-directory: immortalwrt
@@ -292,10 +502,7 @@ jobs:
           make download -j"${BUILD_JOBS}" 2>&1 | tee download.log
 
       # ============================================================
-      # 7. Build the selected target and its required dependencies
-      #
-      # Use world so the Initramfs root filesystem and image are built
-      # through the normal OpenWrt build dependency graph.
+      # 8. Build Recovery and its dependencies
       # ============================================================
       - name: Build XG2010G Initramfs Recovery
         working-directory: immortalwrt
@@ -314,7 +521,7 @@ jobs:
           make -j"${BUILD_JOBS}" world V=s 2>&1 | tee build.log
 
       # ============================================================
-      # 8. Verify the Recovery image and export only that image
+      # 9. Verify and export only the Recovery image
       # ============================================================
       - name: Verify and export Recovery image
         if: success()
@@ -326,9 +533,14 @@ jobs:
           TARGET_DIR="bin/targets/airoha/an7581"
           OUTPUT_DIR="output"
 
+          if [[ ! -d "${TARGET_DIR}" ]]; then
+            echo "::error::Target output directory not found: ${TARGET_DIR}"
+            exit 1
+          fi
+
           mkdir -p "${OUTPUT_DIR}"
 
-          echo "===== Search for XG2010G Recovery image ====="
+          echo "===== Search for Recovery image ====="
 
           mapfile -t RECOVERY_FILES < <(
             find "${TARGET_DIR}" \
@@ -340,10 +552,11 @@ jobs:
           )
 
           if [[ "${#RECOVERY_FILES[@]}" -ne 1 ]]; then
-            echo "::error::Expected exactly one non-empty XG2010G Recovery image."
+            echo "::error::Expected exactly one non-empty Recovery image."
             echo "Found: ${#RECOVERY_FILES[@]}"
 
             echo "===== Available ITB files ====="
+
             find "${TARGET_DIR}" \
               -maxdepth 1 \
               -type f \
@@ -354,27 +567,36 @@ jobs:
           fi
 
           RECOVERY="${RECOVERY_FILES[0]}"
+          RECOVERY_NAME="$(basename "${RECOVERY}")"
 
-          echo "Recovery source: ${RECOVERY}"
+          echo "Recovery image: ${RECOVERY}"
           echo "Recovery size: $(stat -c '%s' "${RECOVERY}") bytes"
 
-          cp "${RECOVERY}" "${OUTPUT_DIR}/"
+          # The project's documented FIT limit is 64 MiB.
+          RECOVERY_SIZE="$(stat -c '%s' "${RECOVERY}")"
+          MAX_SIZE=$((64 * 1024 * 1024))
+
+          if (( RECOVERY_SIZE > MAX_SIZE )); then
+            echo "::error::Recovery image exceeds 64 MiB."
+            exit 1
+          fi
+
+          cp "${RECOVERY}" "${OUTPUT_DIR}/${RECOVERY_NAME}"
 
           echo "===== Generate SHA256 checksum ====="
 
           (
             cd "${OUTPUT_DIR}"
-            sha256sum "$(basename "${RECOVERY}")" \
-              | tee SHA256SUMS
+            sha256sum "${RECOVERY_NAME}" | tee SHA256SUMS
           )
 
           echo "===== Final output ====="
           ls -lh "${OUTPUT_DIR}"
 
-          echo "Recovery image export completed."
+          echo "Recovery export completed."
 
       # ============================================================
-      # 9. Upload only the Recovery firmware and checksum
+      # 10. Upload Recovery artifact
       # ============================================================
       - name: Upload Recovery artifact
         if: success()
@@ -388,7 +610,7 @@ jobs:
           retention-days: 30
 
       # ============================================================
-      # 10. Upload diagnostic logs even when the build fails
+      # 11. Upload diagnostic files even if build fails
       # ============================================================
       - name: Upload build diagnostics
         if: always()
@@ -396,11 +618,51 @@ jobs:
         with:
           name: XG2010G-Recovery-Build-Diagnostics
           path: |
+            immortalwrt/feeds-update.log
+            immortalwrt/feeds-install.log
             immortalwrt/config.log
             immortalwrt/download.log
             immortalwrt/build.log
             immortalwrt/.config
             immortalwrt/xg2010g-recovery.config
-            immortalwrt/selected-packages.txt
+            immortalwrt/selected-package-symbols.txt
           if-no-files-found: ignore
           retention-days: 7
+
+ 
+      # ============================================================
+      # 11. Publish Recovery image to GitHub Release
+      # ============================================================
+      - name: Publish GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          # Unique tag for each workflow run and rerun.
+          tag_name: xg2010g-recovery-${{ github.run_number }}-${{ github.run_attempt }}
+          name: XG2010G Initramfs Recovery #${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+
+          # This workflow is named "Test", so publish as a prerelease.
+          prerelease: true
+          draft: false
+
+          body: |
+            ## XG2010G Initramfs Recovery
+
+            Automatically built by GitHub Actions.
+
+            - Device: Gemtek XG2010G
+            - Target: Airoha AN7581
+            - Image: Initramfs Recovery
+            - Build run: #${{ github.run_number }}
+            - Build attempt: ${{ github.run_attempt }}
+
+            Download the `.itb` image and `SHA256SUMS` below.
+            Verify the SHA256 checksum before using the image.
+
+          files: |
+            immortalwrt/output/*.itb
+            immortalwrt/output/SHA256SUMS
+
+          fail_on_unmatched_files: true
+          make_latest: false
