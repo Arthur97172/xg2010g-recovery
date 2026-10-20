@@ -237,6 +237,86 @@ jobs:
             '/^define Device\/gemtek_xg2010g$/,/^endef$/p' \
             target/linux/airoha/image/an7581.mk
 
+      - name: Remove PON packages from Recovery build
+        working-directory: immortalwrt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("target/linux/airoha/image/an7581.mk")
+          lines = path.read_text().splitlines()
+
+          start_marker = "define Device/gemtek_xg2010g"
+
+          starts = [
+              i for i, line in enumerate(lines)
+              if line.strip() == start_marker
+          ]
+
+          if len(starts) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one XG2010G device definition."
+              )
+
+          start = starts[0]
+
+          ends = [
+              i for i in range(start + 1, len(lines))
+              if lines[i].strip() == "endef"
+          ]
+
+          if not ends:
+              raise SystemExit(
+                  "ERROR: XG2010G device definition has no endef."
+              )
+
+          end = ends[0]
+          block = lines[start:end + 1]
+
+          package_indexes = [
+              i for i, line in enumerate(block)
+              if line.strip().startswith("DEVICE_PACKAGES :=")
+          ]
+
+          if len(package_indexes) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one DEVICE_PACKAGES declaration."
+              )
+
+          i = package_indexes[0]
+
+          # Replace only the XG2010G package list.
+          # Do not modify the kernel, DTB, or Recovery image rule.
+          block[i:i + 3] = [
+              "  DEVICE_PACKAGES := fitblk kmod-leds-gpio "
+              "kmod-gpio-button-hotplug"
+          ]
+
+          if any(
+              package in "\n".join(block)
+              for package in (
+                  "kmod-airoha-xpon-en757x",
+                  "kmod-airoha-pon-lddla",
+                  "airoha-pon-firmware",
+                  "airoha-pon-manager",
+              )
+          ):
+              raise SystemExit(
+                  "ERROR: A PON package remains in the XG2010G device block."
+              )
+
+          lines[start:end + 1] = block
+          path.write_text("\n".join(lines) + "\n")
+
+          print("PASS: PON packages removed from the Recovery profile.")
+          print("PASS: XG2010G Recovery kernel rule remains unchanged.")
+          print("Remaining device packages:")
+          print(block[i])
+          PY
+
       # ============================================================
       # 5. Create a minimal Recovery configuration
       #
