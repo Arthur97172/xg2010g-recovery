@@ -6,7 +6,7 @@
 
 ## GitHub Actions 状态
 
-[![Build XG2010G Initramfs Recovery Test](../../actions)
+[Build XG2010G Initramfs Recovery Test](../../actions)
 
 > 如果徽章无法显示，请检查工作流文件名是否为 `build-xg2010g-recovery.yml`。如果实际文件名不同，请相应修改徽章链接。
 
