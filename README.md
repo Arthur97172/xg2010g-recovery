@@ -2,13 +2,12 @@
 
 为 **Gemtek XG2010G（Airoha AN7581）** 构建 Initramfs Recovery 镜像的 GitHub Actions 自动化项目。
 
-本项目使用 [ImmortalWrt-for-Gemtek-XG2010G](https://github.com/naoki66/ImmortalWrt-for-Gemtek-XG2010G) 作为编译源码，通过 GitHub Actions 自动完成配置、编译、镜像检查、SHA256 校验和 GitHub Release 发布。
+本项目通过 GitHub Actions 自动完成配置、编译、镜像检查、SHA256 校验和 GitHub Release 发布。
 
 ## GitHub Actions 状态
 
 [Build XG2010G Initramfs Recovery Test](../../actions)
 
-> 如果徽章无法显示，请检查工作流文件名是否为 `build-xg2010g-recovery.yml`。如果实际文件名不同，请相应修改徽章链接。
 
 ## 项目特点
 
