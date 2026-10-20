@@ -119,9 +119,6 @@ jobs:
 
       # ============================================================
       # 4. Restrict XG2010G image generation to Recovery
-      #
-      # Keep KERNEL_INITRAMFS and its -recovery.itb suffix.
-      # Remove only the Sysupgrade image declaration.
       # ============================================================
       - name: Restrict image generation to Recovery
         working-directory: immortalwrt
@@ -238,15 +235,7 @@ jobs:
             target/linux/airoha/image/an7581.mk
 
       # ============================================================
-      # Remove PON packages and include Ethernet PHY drivers
-      #
-      # Keep Recovery minimal, but include the drivers needed by:
-      #   - RTL8261N 10G Ethernet PHY
-      #   - Airoha EN8811H 2.5G Ethernet PHY
-      #   - Built-in Airoha Ethernet MAC / MT7530 switch
-      #
-      # NOTE:
-      # The Ethernet PHY drivers must be available in the source tree.
+      # 5. Remove PON packages and include Ethernet PHY drivers
       # ============================================================
       - name: Configure Recovery Ethernet drivers
         working-directory: immortalwrt
@@ -393,9 +382,7 @@ jobs:
       
 
       # ============================================================
-      # 5. Create a minimal Recovery configuration
-      #
-      # Do not copy config.seed.
+      # 6. Create a minimal Recovery configuration
       # ============================================================
       - name: Configure minimal XG2010G Recovery
         working-directory: immortalwrt
@@ -436,11 +423,7 @@ jobs:
           cp .config xg2010g-recovery.config
 
       # ============================================================
-      # 6. Audit unwanted standalone packages
-      #
-      # Do not mistake symbols such as:
-      # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y
-      # for standalone packages.
+      # 7. Audit unwanted standalone packages
       # ============================================================
       - name: Audit selected packages
         working-directory: immortalwrt
@@ -562,7 +545,7 @@ jobs:
           PY
 
       # ============================================================
-      # 7. Download sources for configured packages
+      # 8. Download sources for configured packages
       # ============================================================
       - name: Download build sources
         working-directory: immortalwrt
@@ -577,7 +560,7 @@ jobs:
           make download -j"${BUILD_JOBS}" 2>&1 | tee download.log
 
       # ============================================================
-      # 8. Build Recovery and its dependencies
+      # 9. Build Recovery and its dependencies
       # ============================================================
       - name: Build XG2010G Initramfs Recovery
         working-directory: immortalwrt
@@ -596,7 +579,7 @@ jobs:
           make -j"${BUILD_JOBS}" world V=s 2>&1 | tee build.log
 
       # ============================================================
-      # 9. Verify and export only the Recovery image
+      # 10. Verify and export only the Recovery image
       # ============================================================
       - name: Verify and export Recovery image
         if: success()
@@ -671,7 +654,7 @@ jobs:
           echo "Recovery export completed."
 
       # ============================================================
-      # 10. Upload Recovery artifact
+      # 11. Upload Recovery artifact
       # ============================================================
       - name: Upload Recovery artifact
         if: success()
@@ -685,7 +668,7 @@ jobs:
           retention-days: 30
 
       # ============================================================
-      # 11. Upload diagnostic files even if build fails
+      # 12. Upload diagnostic files even if build fails
       # ============================================================
       - name: Upload build diagnostics
         if: always()
@@ -705,7 +688,7 @@ jobs:
           retention-days: 7
 
       # ============================================================
-      # 11. Publish Recovery image to GitHub Release
+      # 13. Publish Recovery image to GitHub Release
       # ============================================================
       - name: Publish GitHub Release
         if: success()
