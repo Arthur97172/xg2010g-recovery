@@ -1,0 +1,406 @@
+name: Build XG2010G Initramfs Recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_jobs:
+        description: "Number of parallel build jobs"
+        required: true
+        default: "2"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "4"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xg2010g-initramfs-recovery
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build XG2010G Recovery Only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    env:
+      TZ: Asia/Shanghai
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      # ============================================================
+      # 1. Checkout the dedicated XG2010G source repository
+      # ============================================================
+      - name: Checkout XG2010G source
+        uses: actions/checkout@v4
+        with:
+          repository: naoki66/ImmortalWrt-for-Gemtek-XG2010G
+          ref: master
+          path: immortalwrt
+          fetch-depth: 1
+
+      - name: Show source revision
+        working-directory: immortalwrt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "===== Source repository ====="
+          git remote -v
+
+          echo "===== Source commit ====="
+          git log -1 --format='%H%n%ci%n%s'
+
+      # ============================================================
+      # 2. Install build dependencies
+      # ============================================================
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            flex \
+            bison \
+            gcc \
+            g++ \
+            binutils \
+            bzip2 \
+            gawk \
+            gettext \
+            git \
+            libncurses-dev \
+            libssl-dev \
+            libelf-dev \
+            libtool \
+            autoconf \
+            automake \
+            python3 \
+            python3-dev \
+            python3-setuptools \
+            python3-yaml \
+            rsync \
+            swig \
+            unzip \
+            wget \
+            curl \
+            xsltproc \
+            zlib1g-dev \
+            libzstd-dev \
+            device-tree-compiler \
+            file \
+            which \
+            perl \
+            sed \
+            make
+
+      # ============================================================
+      # 3. Install feeds
+      # ============================================================
+      - name: Update and install feeds
+        working-directory: immortalwrt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "===== Update feeds ====="
+          ./scripts/feeds update -a
+
+          echo "===== Install feeds ====="
+          ./scripts/feeds install -a
+
+      # ============================================================
+      # 4. Disable Sysupgrade image generation
+      #
+      # Keep the XG2010G device definition and its Recovery rules.
+      # Remove only the Sysupgrade image declaration for this device.
+      # ============================================================
+      - name: Restrict image generation to Recovery
+        working-directory: immortalwrt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("target/linux/airoha/image/an7581.mk")
+          source = path.read_text()
+
+          start_marker = "define Device/gemtek_xg2010g\n"
+
+          if start_marker not in source:
+              raise SystemExit(
+                  "ERROR: Device/gemtek_xg2010g was not found. "
+                  "The upstream device definition may have changed."
+              )
+
+          start = source.index(start_marker)
+          end = source.index("\nendef", start)
+
+          block = source[start:end]
+
+          # Exact Sysupgrade image declaration in the current source.
+          old = r"""  IMAGES := sysupgrade.itb
+            IMAGE/sysupgrade.itb := append-kernel | \
+            fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb external-static-with-rootfs | \
+            append-metadata
+          """
+
+          # Normalize indentation only for matching the declaration.
+          lines = block.splitlines()
+          result = []
+          i = 0
+          removed = False
+
+          while i < len(lines):
+              if lines[i].strip() == "IMAGES := sysupgrade.itb":
+                  if i + 3 >= len(lines):
+                      raise SystemExit(
+                          "ERROR: Incomplete Sysupgrade declaration."
+                      )
+
+                  if not lines[i + 1].strip().startswith(
+                      "IMAGE/sysupgrade.itb :="
+                  ):
+                      raise SystemExit(
+                          "ERROR: Unexpected Sysupgrade image declaration."
+                      )
+
+                  if not lines[i + 2].strip().startswith("fit gzip "):
+                      raise SystemExit(
+                          "ERROR: Unexpected Sysupgrade FIT rule."
+                      )
+
+                  if lines[i + 3].strip() != "append-metadata":
+                      raise SystemExit(
+                          "ERROR: Unexpected Sysupgrade metadata rule."
+                      )
+
+                  result.extend([])
+                  i += 4
+                  removed = True
+                  continue
+
+              result.append(lines[i])
+              i += 1
+
+          if not removed:
+              raise SystemExit(
+                  "ERROR: Sysupgrade declaration was not found; "
+                  "refusing to modify an unexpected device definition."
+              )
+
+          new_block = "\n".join(result)
+
+          if "IMAGE/sysupgrade.itb" in new_block:
+              raise SystemExit(
+                  "ERROR: Sysupgrade image rule still exists."
+              )
+
+          updated = source[:start] + new_block + source[end:]
+          path.write_text(updated)
+
+          print("Sysupgrade image rule removed for gemtek_xg2010g.")
+          print("Recovery image rule preserved.")
+          PY
+
+          echo "===== Verify image rules ====="
+          sed -n '/define Device\/gemtek_xg2010g/,/^endef/p' \
+            target/linux/airoha/image/an7581.mk
+
+      # ============================================================
+      # 5. Generate a minimal XG2010G Recovery configuration
+      #
+      # Do not copy config.seed: it enables many optional applications.
+      # ============================================================
+      - name: Configure minimal XG2010G Recovery
+        working-directory: immortalwrt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "===== Create minimal .config ====="
+
+          cat > .config <<'EOF'
+          CONFIG_TARGET_airoha=y
+          CONFIG_TARGET_airoha_an7581=y
+          CONFIG_TARGET_airoha_an7581_DEVICE_gemtek_xg2010g=y
+          CONFIG_TARGET_ROOTFS_INITRAMFS=y
+          EOF
+
+          echo "===== Run make defconfig ====="
+          make defconfig 2>&1 | tee config.log
+
+          echo "===== Verify required configuration ====="
+
+          for symbol in \
+            CONFIG_TARGET_airoha \
+            CONFIG_TARGET_airoha_an7581 \
+            CONFIG_TARGET_airoha_an7581_DEVICE_gemtek_xg2010g \
+            CONFIG_TARGET_ROOTFS_INITRAMFS
+          do
+            if ! grep -qx "${symbol}=y" .config; then
+              echo "::error::Required option is missing: ${symbol}=y"
+              exit 1
+            fi
+          done
+
+          echo "===== Check optional plugins ====="
+
+          if grep -E \
+            '^CONFIG_PACKAGE_(luci(-[[:alnum:].+-]+)?|sing-box|xray-core|rclone|openclash|adguardhome|tailscale|miniupnpd)=y$' \
+            .config; then
+            echo "::error::An unwanted optional package is enabled."
+            exit 1
+          fi
+
+          grep -E '^CONFIG_PACKAGE_[^=]+=y$' .config \
+            | sort > selected-packages.txt
+
+          echo "===== Selected package count ====="
+          wc -l selected-packages.txt
+
+          echo "===== Selected package list ====="
+          cat selected-packages.txt
+
+          cp .config xg2010g-recovery.config
+
+          echo "Minimal Recovery configuration verified."
+
+      # ============================================================
+      # 6. Download sources for selected packages
+      # ============================================================
+      - name: Download build sources
+        working-directory: immortalwrt
+        shell: bash
+        env:
+          BUILD_JOBS: ${{ inputs.build_jobs }}
+        run: |
+          set -Eeuo pipefail
+
+          echo "Build jobs: ${BUILD_JOBS}"
+
+          make download -j"${BUILD_JOBS}" 2>&1 | tee download.log
+
+      # ============================================================
+      # 7. Build the selected target and its required dependencies
+      #
+      # Use world so the Initramfs root filesystem and image are built
+      # through the normal OpenWrt build dependency graph.
+      # ============================================================
+      - name: Build XG2010G Initramfs Recovery
+        working-directory: immortalwrt
+        shell: bash
+        env:
+          BUILD_JOBS: ${{ inputs.build_jobs }}
+        run: |
+          set -Eeuo pipefail
+
+          echo "===== Build configuration ====="
+          echo "Target: Airoha AN7581"
+          echo "Device: Gemtek XG2010G"
+          echo "Image: Initramfs Recovery"
+          echo "Jobs: ${BUILD_JOBS}"
+
+          make -j"${BUILD_JOBS}" world V=s 2>&1 | tee build.log
+
+      # ============================================================
+      # 8. Verify the Recovery image and export only that image
+      # ============================================================
+      - name: Verify and export Recovery image
+        if: success()
+        working-directory: immortalwrt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          TARGET_DIR="bin/targets/airoha/an7581"
+          OUTPUT_DIR="output"
+
+          mkdir -p "${OUTPUT_DIR}"
+
+          echo "===== Search for XG2010G Recovery image ====="
+
+          mapfile -t RECOVERY_FILES < <(
+            find "${TARGET_DIR}" \
+              -maxdepth 1 \
+              -type f \
+              -name '*gemtek_xg2010g*recovery.itb' \
+              -size +0c \
+              -print
+          )
+
+          if [[ "${#RECOVERY_FILES[@]}" -ne 1 ]]; then
+            echo "::error::Expected exactly one non-empty XG2010G Recovery image."
+            echo "Found: ${#RECOVERY_FILES[@]}"
+
+            echo "===== Available ITB files ====="
+            find "${TARGET_DIR}" \
+              -maxdepth 1 \
+              -type f \
+              -name '*.itb' \
+              -print 2>/dev/null || true
+
+            exit 1
+          fi
+
+          RECOVERY="${RECOVERY_FILES[0]}"
+
+          echo "Recovery source: ${RECOVERY}"
+          echo "Recovery size: $(stat -c '%s' "${RECOVERY}") bytes"
+
+          cp "${RECOVERY}" "${OUTPUT_DIR}/"
+
+          echo "===== Generate SHA256 checksum ====="
+
+          (
+            cd "${OUTPUT_DIR}"
+            sha256sum "$(basename "${RECOVERY}")" \
+              | tee SHA256SUMS
+          )
+
+          echo "===== Final output ====="
+          ls -lh "${OUTPUT_DIR}"
+
+          echo "Recovery image export completed."
+
+      # ============================================================
+      # 9. Upload only the Recovery firmware and checksum
+      # ============================================================
+      - name: Upload Recovery artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: XG2010G-Initramfs-Recovery
+          path: |
+            immortalwrt/output/*.itb
+            immortalwrt/output/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+      # ============================================================
+      # 10. Upload diagnostic logs even when the build fails
+      # ============================================================
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: XG2010G-Recovery-Build-Diagnostics
+          path: |
+            immortalwrt/config.log
+            immortalwrt/download.log
+            immortalwrt/build.log
+            immortalwrt/.config
+            immortalwrt/xg2010g-recovery.config
+            immortalwrt/selected-packages.txt
+          if-no-files-found: ignore
+          retention-days: 7
