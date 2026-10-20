@@ -1,0 +1,550 @@
+name: Build XG2010G Initramfs Recovery Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_jobs:
+        description: "Number of parallel build jobs"
+        required: true
+        default: "2"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "4"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xg2010g-initramfs-recovery
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build XG2010G Recovery Only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    env:
+      TZ: Asia/Shanghai
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      # ============================================================
+      # 1. Checkout XG2010G source
+      # ============================================================
+      - name: Checkout XG2010G source
+        uses: actions/checkout@v4
+        with:
+          repository: naoki66/ImmortalWrt-for-Gemtek-XG2010G
+          ref: master
+          path: immortalwrt
+          fetch-depth: 1
+
+      - name: Show source revision
+        working-directory: immortalwrt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "===== Source repository ====="
+          git remote -v
+
+          echo "===== Source commit ====="
+          git log -1 --format='%H%n%ci%n%s'
+
+      # ============================================================
+      # 2. Install build dependencies
+      # ============================================================
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            flex \
+            bison \
+            gcc \
+            g++ \
+            binutils \
+            bzip2 \
+            gawk \
+            gettext \
+            git \
+            libncurses-dev \
+            libssl-dev \
+            libelf-dev \
+            libtool \
+            autoconf \
+            automake \
+            python3 \
+            python3-dev \
+            python3-setuptools \
+            python3-yaml \
+            rsync \
+            swig \
+            unzip \
+            wget \
+            curl \
+            xsltproc \
+            zlib1g-dev \
+            libzstd-dev \
+            device-tree-compiler \
+            file \
+            which \
+            perl \
+            sed \
+            make
+
+      # ============================================================
+      # 3. Update and install feeds
+      # ============================================================
+      - name: Update and install feeds
+        working-directory: immortalwrt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "===== Update feeds ====="
+          ./scripts/feeds update -a 2>&1 | tee feeds-update.log
+
+          echo "===== Install feeds ====="
+          ./scripts/feeds install -a 2>&1 | tee feeds-install.log
+
+      # ============================================================
+      # 4. Restrict XG2010G image generation to Recovery
+      #
+      # Keep KERNEL_INITRAMFS and its -recovery.itb suffix.
+      # Remove only the Sysupgrade image declaration.
+      # ============================================================
+      - name: Restrict image generation to Recovery
+        working-directory: immortalwrt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("target/linux/airoha/image/an7581.mk")
+
+          if not path.is_file():
+              raise SystemExit(
+                  f"ERROR: Device image definition not found: {path}"
+              )
+
+          lines = path.read_text().splitlines()
+
+          start_marker = "define Device/gemtek_xg2010g"
+
+          starts = [
+              i for i, line in enumerate(lines)
+              if line.strip() == start_marker
+          ]
+
+          if len(starts) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one "
+                  "Device/gemtek_xg2010g definition."
+              )
+
+          start = starts[0]
+
+          end_candidates = [
+              i for i in range(start + 1, len(lines))
+              if lines[i].strip() == "endef"
+          ]
+
+          if not end_candidates:
+              raise SystemExit(
+                  "ERROR: Device definition has no matching endef."
+              )
+
+          end = end_candidates[0]
+          block = lines[start:end + 1]
+
+          # Find the exact Sysupgrade declaration.
+          image_indexes = [
+              i for i, line in enumerate(block)
+              if line.strip() == "IMAGES := sysupgrade.itb"
+          ]
+
+          if len(image_indexes) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one "
+                  "'IMAGES := sysupgrade.itb' declaration."
+              )
+
+          i = image_indexes[0]
+
+          expected = [
+              "IMAGES := sysupgrade.itb",
+              "IMAGE/sysupgrade.itb := append-kernel | \\",
+              "fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb external-static-with-rootfs | \\",
+              "append-metadata",
+          ]
+
+          actual = [
+              line.strip()
+              for line in block[i:i + len(expected)]
+          ]
+
+          if actual != expected:
+              print("Unexpected image declaration:")
+              for line in block[max(0, i - 1):i + 6]:
+                  print(repr(line))
+
+              raise SystemExit(
+                  "ERROR: Sysupgrade rule differs from the "
+                  "expected source. Refusing to modify it."
+              )
+
+          del block[i:i + len(expected)]
+
+          new_block = "\n".join(block)
+
+          if "IMAGE/sysupgrade.itb" in new_block:
+              raise SystemExit(
+                  "ERROR: Sysupgrade image rule still exists."
+              )
+
+          if "KERNEL_INITRAMFS_SUFFIX := -recovery.itb" not in new_block:
+              raise SystemExit(
+                  "ERROR: Recovery image suffix is missing."
+              )
+
+          if "KERNEL_INITRAMFS :=" not in new_block:
+              raise SystemExit(
+                  "ERROR: Recovery kernel rule is missing."
+              )
+
+          lines[start:end + 1] = block
+          path.write_text("\n".join(lines) + "\n")
+
+          print("PASS: XG2010G Sysupgrade rule removed.")
+          print("PASS: XG2010G Recovery rule preserved.")
+          PY
+
+          echo "===== Verify XG2010G device definition ====="
+
+          sed -n \
+            '/^define Device\/gemtek_xg2010g$/,/^endef$/p' \
+            target/linux/airoha/image/an7581.mk
+
+      # ============================================================
+      # 5. Create a minimal Recovery configuration
+      #
+      # Do not copy config.seed.
+      # ============================================================
+      - name: Configure minimal XG2010G Recovery
+        working-directory: immortalwrt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "===== Create minimal .config ====="
+
+          cat > .config <<'EOF'
+          CONFIG_TARGET_airoha=y
+          CONFIG_TARGET_airoha_an7581=y
+          CONFIG_TARGET_airoha_an7581_DEVICE_gemtek_xg2010g=y
+          CONFIG_TARGET_ROOTFS_INITRAMFS=y
+          EOF
+
+          echo "===== Run make defconfig ====="
+
+          make defconfig 2>&1 | tee config.log
+
+          echo "===== Verify required target options ====="
+
+          for symbol in \
+            CONFIG_TARGET_airoha \
+            CONFIG_TARGET_airoha_an7581 \
+            CONFIG_TARGET_airoha_an7581_DEVICE_gemtek_xg2010g \
+            CONFIG_TARGET_ROOTFS_INITRAMFS
+          do
+            if ! grep -qx "${symbol}=y" .config; then
+              echo "::error::Required option missing: ${symbol}=y"
+              exit 1
+            fi
+          done
+
+          echo "PASS: Required XG2010G Recovery target is selected."
+
+          # Save the resolved configuration before package auditing.
+          cp .config xg2010g-recovery.config
+
+      # ============================================================
+      # 6. Audit unwanted standalone packages
+      #
+      # Do not mistake symbols such as:
+      # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y
+      # for standalone packages.
+      # ============================================================
+      - name: Audit selected packages
+        working-directory: immortalwrt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          config_path = Path(".config")
+          lines = config_path.read_text().splitlines()
+
+          # Collect every enabled CONFIG_PACKAGE symbol.
+          enabled_symbols = set()
+
+          for line in lines:
+              match = re.fullmatch(
+                  r"CONFIG_PACKAGE_(.+)=y",
+                  line
+              )
+
+              if match:
+                  enabled_symbols.add(match.group(1))
+
+          # Exact standalone package names.
+          # INCLUDE_* and other sub-options do not match these names.
+          forbidden_exact = {
+              "luci",
+              "luci-app-passwall",
+              "luci-app-passwall2",
+              "luci-app-ssr-plus",
+              "luci-app-rclone",
+              "sing-box",
+              "xray-core",
+              "rclone",
+              "openclash",
+              "luci-app-openclash",
+              "adguardhome",
+              "tailscale",
+              "miniupnpd",
+          }
+
+          forbidden = sorted(
+              enabled_symbols & forbidden_exact
+          )
+
+          # Check all standalone LuCI package symbols.
+          # The pattern deliberately excludes underscore sub-options,
+          # for example luci-lib-nixio_openssl.
+          luci_pattern = re.compile(
+              r"^luci(?:-[A-Za-z0-9.+-]+)?$"
+          )
+
+          enabled_luci = sorted(
+              symbol for symbol in enabled_symbols
+              if luci_pattern.fullmatch(symbol)
+          )
+
+          print("===== Forbidden standalone packages =====")
+
+          if forbidden:
+              for package in forbidden:
+                  print(f"  CONFIG_PACKAGE_{package}=y")
+
+          if enabled_luci:
+              print("===== Enabled standalone LuCI packages =====")
+              for package in enabled_luci:
+                  print(f"  CONFIG_PACKAGE_{package}=y")
+
+          if forbidden or enabled_luci:
+              raise SystemExit(
+                  "ERROR: Unwanted standalone package selections found."
+              )
+
+          print("PASS: No forbidden standalone packages selected.")
+
+          # These are configuration symbols, not necessarily packages.
+          # Print them separately for diagnostic purposes.
+          suboption_patterns = [
+              re.compile(r"^luci-app-passwall_INCLUDE_.+$"),
+              re.compile(r"^luci-app-passwall2_INCLUDE_.+$"),
+              re.compile(r"^luci-app-ssr-plus_INCLUDE_.+$"),
+              re.compile(r"^luci-app-rclone_INCLUDE_.+$"),
+              re.compile(r"^luci-lib-nixio_.+$"),
+          ]
+
+          suboptions = sorted(
+              symbol for symbol in enabled_symbols
+              if any(
+                  pattern.fullmatch(symbol)
+                  for pattern in suboption_patterns
+              )
+          )
+
+          print("===== Plugin-related sub-options =====")
+
+          if suboptions:
+              for symbol in suboptions:
+                  print(f"  CONFIG_PACKAGE_{symbol}=y")
+
+              print(
+                  "These are sub-options, not proof that the "
+                  "corresponding standalone packages are selected."
+              )
+          else:
+              print("No listed plugin-related sub-options enabled.")
+
+          # Save the raw symbol list for later diagnosis.
+          Path("selected-package-symbols.txt").write_text(
+              "".join(
+                  f"CONFIG_PACKAGE_{symbol}=y\n"
+                  for symbol in sorted(enabled_symbols)
+              )
+          )
+
+          print("Package audit completed.")
+          PY
+
+      # ============================================================
+      # 7. Download sources for configured packages
+      # ============================================================
+      - name: Download build sources
+        working-directory: immortalwrt
+        shell: bash
+        env:
+          BUILD_JOBS: ${{ inputs.build_jobs }}
+        run: |
+          set -Eeuo pipefail
+
+          echo "Build jobs: ${BUILD_JOBS}"
+
+          make download -j"${BUILD_JOBS}" 2>&1 | tee download.log
+
+      # ============================================================
+      # 8. Build Recovery and its dependencies
+      # ============================================================
+      - name: Build XG2010G Initramfs Recovery
+        working-directory: immortalwrt
+        shell: bash
+        env:
+          BUILD_JOBS: ${{ inputs.build_jobs }}
+        run: |
+          set -Eeuo pipefail
+
+          echo "===== Build configuration ====="
+          echo "Target: Airoha AN7581"
+          echo "Device: Gemtek XG2010G"
+          echo "Image: Initramfs Recovery"
+          echo "Jobs: ${BUILD_JOBS}"
+
+          make -j"${BUILD_JOBS}" world V=s 2>&1 | tee build.log
+
+      # ============================================================
+      # 9. Verify and export only the Recovery image
+      # ============================================================
+      - name: Verify and export Recovery image
+        if: success()
+        working-directory: immortalwrt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          TARGET_DIR="bin/targets/airoha/an7581"
+          OUTPUT_DIR="output"
+
+          if [[ ! -d "${TARGET_DIR}" ]]; then
+            echo "::error::Target output directory not found: ${TARGET_DIR}"
+            exit 1
+          fi
+
+          mkdir -p "${OUTPUT_DIR}"
+
+          echo "===== Search for Recovery image ====="
+
+          mapfile -t RECOVERY_FILES < <(
+            find "${TARGET_DIR}" \
+              -maxdepth 1 \
+              -type f \
+              -name '*gemtek_xg2010g*recovery.itb' \
+              -size +0c \
+              -print
+          )
+
+          if [[ "${#RECOVERY_FILES[@]}" -ne 1 ]]; then
+            echo "::error::Expected exactly one non-empty Recovery image."
+            echo "Found: ${#RECOVERY_FILES[@]}"
+
+            echo "===== Available ITB files ====="
+
+            find "${TARGET_DIR}" \
+              -maxdepth 1 \
+              -type f \
+              -name '*.itb' \
+              -print 2>/dev/null || true
+
+            exit 1
+          fi
+
+          RECOVERY="${RECOVERY_FILES[0]}"
+          RECOVERY_NAME="$(basename "${RECOVERY}")"
+
+          echo "Recovery image: ${RECOVERY}"
+          echo "Recovery size: $(stat -c '%s' "${RECOVERY}") bytes"
+
+          # The project's documented FIT limit is 64 MiB.
+          RECOVERY_SIZE="$(stat -c '%s' "${RECOVERY}")"
+          MAX_SIZE=$((64 * 1024 * 1024))
+
+          if (( RECOVERY_SIZE > MAX_SIZE )); then
+            echo "::error::Recovery image exceeds 64 MiB."
+            exit 1
+          fi
+
+          cp "${RECOVERY}" "${OUTPUT_DIR}/${RECOVERY_NAME}"
+
+          echo "===== Generate SHA256 checksum ====="
+
+          (
+            cd "${OUTPUT_DIR}"
+            sha256sum "${RECOVERY_NAME}" | tee SHA256SUMS
+          )
+
+          echo "===== Final output ====="
+          ls -lh "${OUTPUT_DIR}"
+
+          echo "Recovery export completed."
+
+      # ============================================================
+      # 10. Upload Recovery artifact
+      # ============================================================
+      - name: Upload Recovery artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: XG2010G-Initramfs-Recovery
+          path: |
+            immortalwrt/output/*.itb
+            immortalwrt/output/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+      # ============================================================
+      # 11. Upload diagnostic files even if build fails
+      # ============================================================
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: XG2010G-Recovery-Build-Diagnostics
+          path: |
+            immortalwrt/feeds-update.log
+            immortalwrt/feeds-install.log
+            immortalwrt/config.log
+            immortalwrt/download.log
+            immortalwrt/build.log
+            immortalwrt/.config
+            immortalwrt/xg2010g-recovery.config
+            immortalwrt/selected-package-symbols.txt
+          if-no-files-found: ignore
+          retention-days: 7
