@@ -83,34 +83,6 @@
 
 诊断文件用于排查构建问题，不属于 Recovery 固件本身。
 
-## 验证 SHA256
-
-下载 Recovery 镜像和 `SHA256SUMS` 后，建议先验证文件完整性。
-
-### Linux
-
-在两个文件所在的目录执行：
-
-```bash
-sha256sum -c SHA256SUMS
-```
-
-如果输出对应镜像文件的 `OK`，表示文件的 SHA256 与校验清单一致。
-
-### Windows
-
-在 PowerShell 中执行：
-
-```powershell
-Get-FileHash .\your-recovery.itb -Algorithm SHA256
-```
-
-将输出的 `Hash` 与 `SHA256SUMS` 中对应镜像的 SHA256 值进行比较。
-
-请将 `your-recovery.itb` 替换为实际下载的文件名。
-
-> SHA256 校验只能检查文件是否与校验值一致，不能证明固件来源可信、固件适用于设备，或刷写操作没有风险。
-
 ## Recovery 镜像说明
 
 Initramfs Recovery 与常规 Sysupgrade 固件不同。
